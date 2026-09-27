@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trace-selector"
+version = "0.1.0"
+description = "Trajectory Ranking with Aggregated Cross-Rollout Evidence"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "torch==2.9.0",
+  "torch-geometric==2.6.1",
+  "numpy==2.2.6",
+  "scipy==1.18.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+prepare = ["transformers>=4.51,<6", "pyarrow>=19"]
+
+[project.scripts]
+trace-train = "trace_selector.train:main"
+trace-evaluate = "trace_selector.evaluate:main"
+trace-demo = "trace_selector.demo:main"
+trace-prepare = "trace_selector.prepare:main"
+trace-embed = "trace_selector.embeddings:main"
+trace-documents = "trace_selector.prepare_documents:main"
+
+[tool.setuptools.packages.find]
+include = ["trace_selector*"]
+
+[tool.setuptools.package-data]
+trace_selector = ["configs/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore:There exist node types.*:UserWarning"]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
