@@ -1,0 +1,464 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>TRACE demo</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  svg { display: block; }
+  text { font-family: "Times New Roman", "STIX Two Text", Times, serif; }
+  .sans { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; }
+</style>
+</head>
+<body>
+<svg id="stage" width="1280" height="720" viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg"></svg>
+<script>
+// Illustrative long-horizon example rendered in the style of the TRACE paper figure.
+// K = 3 rollouts; majority voting picks a wrong answer, TRACE selects the correct existing rollout.
+// renderAt(t) is deterministic so that frames can be captured for the README GIF.
+const DURATION = 25.0;
+const C = {
+  ink: '#1F2937', muted: '#6B7280', faint: '#E5E7EB', panel: '#F8FAFC', panelStroke: '#D8DEE6',
+  S: '#2B6CB0', Sl: '#E3EEFA',          // Subquery
+  E: '#D69E2E', El: '#FFF4D6',          // Evidence
+  D: '#7E57C2', Dl: '#EFE7FA',          // Doc
+  A: '#C2185B', Al: '#FDE7EF',          // Answer
+  Q: '#1F8A7A', Ql: '#E0F4F1',          // Query
+  ss: '#2B6CB0', open: '#2F9E5B', find: '#1A9AA8', ed: '#8E5BD0', ctx: '#D9478F',
+  qf: '#7E57C2', qfl: '#F6F0FC',
+  st1: '#1565C0', st2: '#1E8C7E', st3: '#6F4CBF', st4: '#E08A1E',
+  bad: '#DC2626', good: '#16A34A', goodl: '#EEF9F1',
+};
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const seg = (t, a, b) => clamp((t - a) / (b - a));
+const ease = x => x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+const lerp = (a, b, p) => a + (b - a) * p;
+const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const sub = (base, idx, size = '68%') => `${base}<tspan dy="4" font-size="${size}">${idx}</tspan>`;
+
+const QUESTION = 'In what year did the architect of the Sydney Opera House receive the Pritzker Prize?';
+const P = [104, 282, 460], PH = 170, PX = 140, PW = 785;
+const rowS = i => P[i] + 48, rowE = i => P[i] + 105, rowD = i => P[i] + 152;
+const LIN_Y = i => P[i] + 76, LIN_X = j => 232 + j * 150;
+const AX = 1030, QFX = 1030, SCX = 1190;
+const aY = i => P[i] + 38, qfY = i => P[i] + 112;
+
+const R = [
+  { ans: '1973', ok: false, ev: [
+    { k: 'S', idx: '1,1', tool: 'Search', t: 'Opera House Pritzker', gx: 360 },
+    { k: 'E', idx: '1,1', tool: 'Open', t: 'Sydney Opera House', sn: '…by Jørn Utzon', doc: 'A', gx: 300, src: 0 },
+    { k: 'E', idx: '1,2', tool: 'Find', t: '“1973” in page', sn: '…opened in 1973', doc: 'A', gx: 440, src: 0 },
+  ] },
+  { ans: '1973', ok: false, ev: [
+    { k: 'S', idx: '2,1', tool: 'Search', t: 'Opera House architect', gx: 360 },
+    { k: 'E', idx: '2,1', tool: 'Open', t: 'Sydney Opera House', sn: '…architect Jørn Utzon', doc: 'A', gx: 300, src: 0 },
+    { k: 'S', idx: '2,2', tool: 'Search', t: 'Utzon Pritzker Prize', gx: 660 },
+    { k: 'E', idx: '2,2', tool: 'Open', t: 'Jørn Utzon', sn: '…Sydney Opera House (1973)', doc: 'B', gx: 660, src: 2 },
+  ] },
+  { ans: '2003', ok: true, ev: [
+    { k: 'S', idx: '3,1', tool: 'Search', t: 'Pritzker laureates', gx: 360 },
+    { k: 'E', idx: '3,1', tool: 'Open', t: 'Pritzker Prize', sn: '2003 · Jørn Utzon', doc: 'C', gx: 300, src: 0 },
+    { k: 'S', idx: '3,2', tool: 'Search', t: 'Utzon Pritzker year', gx: 660 },
+    { k: 'E', idx: '3,2', tool: 'Open', t: 'Jørn Utzon', sn: '…Danish architect', doc: 'B', gx: 620, src: 2 },
+    { k: 'E', idx: '3,3', tool: 'Find', t: '“Pritzker” in page', sn: '…Pritzker Prize in 2003', doc: 'B', gx: 760, src: 2 },
+  ] },
+];
+const DOCS = {
+  A: { x: 82, y: 278, label: 'Sydney Opera House', order: 0, shared: true },
+  B: { x: 82, y: 456, label: 'Jørn Utzon', order: 1, shared: true },
+  C: { x: 300, y: rowD(2), label: 'Pritzker Prize', order: 2, shared: false },
+};
+const ATTN = [[0.3, 0.25, 0.45], [0.2, 0.3, 0.2, 0.3], [0.1, 0.3, 0.1, 0.2, 0.3]];
+const SCORES = [0.21, 0.34, 0.87];
+const STAGES = [
+  ['1', 'Parallel search', C.st1], ['2', 'Graph construction', C.st2],
+  ['3', 'Evidence propagation', C.st3], ['4', 'Trajectory scoring', C.st4],
+];
+const T = { graph: 7.8, morphEnd: 9.1, edges: 9.2, gnn: 10.8, score: 15.3, select: 19.8, banner: 20.6 };
+function stageIndex(t) { return t < T.graph ? 0 : t < T.gnn ? 1 : t < T.score ? 2 : 3; }
+
+// Node geometry in graph mode.
+const nodeSize = k => k === 'S' ? [66, 28] : [66, 34];
+const gpos = (ri, e) => ({ x: e.gx, y: e.k === 'S' ? rowS(ri) : rowE(ri) });
+
+// Edges: quadratic curves with type-specific color.
+const EDGES = [];
+function addEdge(type, x1, y1, cx, cy, x2, y2, extra = {}) { EDGES.push({ type, x1, y1, cx, cy, x2, y2, ...extra }); }
+const DOC_CTRL = {  // hand-tuned controls for long links to shared documents
+  '0:1': [200, 275], '0:2': [280, 290], '1:1': [190, 330], '1:3': [330, 445], '2:3': [380, 470], '2:4': [430, 462],
+};
+R.forEach((r, ri) => {
+  let lastS = null;
+  r.ev.forEach((e, j) => {
+    const p = gpos(ri, e);
+    if (e.k === 'S') {
+      if (lastS !== null) {
+        const q = gpos(ri, r.ev[lastS]);
+        addEdge('ss', q.x + 33, q.y, (q.x + p.x) / 2, q.y, p.x - 33, p.y, { ri });
+      }
+      lastS = j;
+    } else {
+      const s = gpos(ri, r.ev[e.src]);
+      const type = e.tool === 'Open' ? 'open' : 'find';
+      addEdge(type, s.x, s.y + 14, (s.x + p.x) / 2, (s.y + p.y) / 2, p.x, p.y - 17, { ri });
+      const d = DOCS[e.doc];
+      if (d.shared) {
+        const below = d.y > p.y;
+        const [cx, cy] = DOC_CTRL[`${ri}:${j}`];
+        addEdge('ed', p.x, below ? p.y + 17 : p.y - 17, cx, cy, d.x + 32, d.y, { ri, doc: e.doc });
+      } else {
+        addEdge('ed', p.x, p.y + 17, p.x, (p.y + d.y) / 2, d.x, d.y - 14, { ri, doc: e.doc });
+      }
+    }
+  });
+});
+const qpt = (e, p) => ({
+  x: (1 - p) * (1 - p) * e.x1 + 2 * (1 - p) * p * e.cx + p * p * e.x2,
+  y: (1 - p) * (1 - p) * e.y1 + 2 * (1 - p) * p * e.cy + p * p * e.y2,
+});
+const edgeColor = { ss: C.ss, open: C.open, find: C.find, ed: C.ed };
+
+function defs() {
+  let s = '<defs>';
+  Object.entries(edgeColor).forEach(([k, col]) => {
+    s += `<marker id="m-${k}" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 1 L9 5 L0 9 z" fill="${col}"/></marker>`;
+  });
+  s += `<marker id="m-gray" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 1 L9 5 L0 9 z" fill="#64748B"/></marker>`;
+  s += `<marker id="m-qf" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 1 L9 5 L0 9 z" fill="${C.A}"/></marker>`;
+  return s + '</defs>';
+}
+
+function icon(ok, x, y, s, color) {
+  const w = Math.max(2, s * 0.16);
+  return ok
+    ? `<path d="M${x - s * 0.42} ${y + s * 0.02} L${x - s * 0.12} ${y + s * 0.32} L${x + s * 0.45} ${y - s * 0.3}" fill="none" stroke="${color}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"/>`
+    : `<path d="M${x - s * 0.32} ${y - s * 0.32} L${x + s * 0.32} ${y + s * 0.32} M${x + s * 0.32} ${y - s * 0.32} L${x - s * 0.32} ${y + s * 0.32}" stroke="${color}" stroke-width="${w}" stroke-linecap="round"/>`;
+}
+function badge(ok, x, y, op) {
+  const col = ok ? C.good : C.bad;
+  return `<g opacity="${op}"><circle cx="${x}" cy="${y}" r="10" fill="#fff" stroke="${col}" stroke-width="2"/>${icon(ok, x, y, 11, col)}</g>`;
+}
+function hexPath(x, y, w, h) {
+  const c = 9;
+  return `M${x - w / 2} ${y} L${x - w / 2 + c} ${y - h / 2} L${x + w / 2 - c} ${y - h / 2} L${x + w / 2} ${y} L${x + w / 2 - c} ${y + h / 2} L${x - w / 2 + c} ${y + h / 2} Z`;
+}
+
+function header(t) {
+  const si = stageIndex(t);
+  let s = `<text x="40" y="38" font-size="27" font-weight="700" fill="${C.ink}">TRACE</text>`;
+  STAGES.forEach(([num, name, col], i) => {
+    const x = 150 + i * 274, y = 12, w = 266, h = 34;
+    const active = i === si, done = i < si;
+    s += `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="6" fill="${active ? col : '#fff'}" stroke="${col}" stroke-width="1.5" opacity="${active || done ? 1 : 0.55}"/>
+      <circle cx="${x + 20}" cy="${y + 17}" r="10" fill="${active ? '#fff' : col}" opacity="${active || done ? 1 : 0.55}"/>
+      <text x="${x + 20}" y="${y + 22}" font-size="14" font-weight="700" fill="${active ? col : '#fff'}" text-anchor="middle">${num}</text>
+      <text x="${x + 38}" y="${y + 23}" font-size="17" font-style="italic" font-weight="700" fill="${active ? '#fff' : col}" opacity="${active || done ? 1 : 0.6}">${name}</text>`;
+  });
+  return s;
+}
+
+function question(t) {
+  const a = ease(seg(t, 0.1, 0.8));
+  return `<g opacity="${a}">
+    <rect x="40" y="58" width="1110" height="36" rx="8" fill="${C.Ql}" stroke="${C.Q}" stroke-width="1.2"/>
+    <text x="58" y="82" font-size="18" font-style="italic" font-weight="700" fill="${C.Q}">q</text>
+    <text x="80" y="82" font-size="17" fill="${C.ink}">${esc(QUESTION)}</text>
+    <text x="1136" y="82" font-size="15" font-style="italic" fill="${C.muted}" text-anchor="end">K = 3 rollouts</text>
+  </g>`;
+}
+
+function panels(t) {
+  const a = ease(seg(t, 0.8, 1.3));
+  const hl = ease(seg(t, T.select, T.select + 0.6));
+  let s = '';
+  P.forEach((y, i) => {
+    const win = i === 2;
+    const fill = win ? C.panel : C.panel, stroke = C.panelStroke;
+    s += `<g opacity="${a}"><rect x="${PX}" y="${y}" width="${PW}" height="${PH}" rx="10" fill="${fill}" stroke="${stroke}" stroke-width="1.2"/>`;
+    if (win && hl > 0) s += `<rect x="${PX}" y="${y}" width="${PW}" height="${PH}" rx="10" fill="${C.goodl}" stroke="${C.good}" stroke-width="2.2" opacity="${hl}"/>`;
+    s += `<text x="${PX + 14}" y="${y + 22}" font-size="16" font-weight="700" fill="${C.ink}">Rollout ${i + 1}</text>
+      <text x="${PX + 100}" y="${y + 22}" font-size="17" font-style="italic" fill="${C.st1}">${sub('τ', i + 1)}</text></g>`;
+  });
+  return s;
+}
+
+function legend(t) {
+  const a = ease(seg(t, T.graph + 0.6, T.graph + 1.4));
+  if (a <= 0) return '';
+  const y = 700;
+  let s = `<g opacity="${a}">`;
+  const items = [
+    [`<rect x="-12" y="-9" width="24" height="18" rx="9" fill="${C.Sl}" stroke="${C.S}"/>`, 'Subquery'],
+    [`<rect x="-12" y="-9" width="24" height="18" rx="3" fill="${C.El}" stroke="${C.E}"/>`, 'Evidence'],
+    [`<path d="${hexPath(0, 0, 28, 18)}" fill="${C.Dl}" stroke="${C.D}"/>`, 'Doc'],
+    [`<rect x="-12" y="-9" width="24" height="18" rx="3" fill="${C.Al}" stroke="${C.A}"/>`, 'Answer'],
+    [`<line x1="-14" y1="0" x2="14" y2="0" stroke="${C.ss}" stroke-width="2"/>`, 'S↔S'],
+    [`<line x1="-14" y1="0" x2="14" y2="0" stroke="${C.open}" stroke-width="2"/>`, 'S↔E Open'],
+    [`<line x1="-14" y1="0" x2="14" y2="0" stroke="${C.find}" stroke-width="2"/>`, 'S↔E Find'],
+    [`<line x1="-14" y1="0" x2="14" y2="0" stroke="${C.ed}" stroke-width="2"/>`, 'E↔D'],
+  ];
+  let x = 60;
+  items.forEach(([shape, name]) => {
+    s += `<g transform="translate(${x} ${y - 5})">${shape}</g><text x="${x + 20}" y="${y}" font-size="14" fill="${C.muted}">${name}</text>`;
+    x += 48 + name.length * 7.6;
+  });
+  return s + '</g>';
+}
+
+function appearTime(ri, j) { return 1.3 + j * 0.85 + ri * 0.12; }
+function answerTime(ri) { return appearTime(ri, R[ri].ev.length) + 0.15; }
+
+function morphP(t) { return ease(seg(t, T.graph, T.morphEnd)); }
+
+function drawEvent(ri, j, e, t, m) {
+  const a = seg(t, appearTime(ri, j), appearTime(ri, j) + 0.35);
+  if (a <= 0) return '';
+  const col = C[e.k], light = C[e.k + 'l'];
+  const g = gpos(ri, e), [nw, nh] = nodeSize(e.k);
+  const x = lerp(LIN_X(j), g.x, m), y = lerp(LIN_Y(ri), g.y, m);
+  const w = lerp(140, nw, m), h = lerp(48, nh, m);
+  const rx = e.k === 'S' ? lerp(6, nh / 2, m) : lerp(6, 4, m);
+  const sc = lerp(0.85, 1, ease(a));
+  const tOp = clamp(1 - 2.4 * m), nOp = clamp(2.2 * m - 1.2);
+  let s = `<g opacity="${clamp(a * 1.6)}" transform="translate(${x} ${y}) scale(${sc}) translate(${-x} ${-y})">`;
+  s += `<rect x="${x - w / 2}" y="${y - h / 2}" width="${w}" height="${h}" rx="${rx}" fill="${light}" stroke="${col}" stroke-width="1.5"/>`;
+  if (tOp > 0) {
+    s += `<text x="${x - 62}" y="${y - 6}" font-size="12" font-weight="700" fill="${col}" class="sans" letter-spacing="0.8" opacity="${tOp}">${e.tool.toUpperCase()}</text>
+      <text x="${x - 62}" y="${y + 14}" font-size="14" fill="${C.ink}" opacity="${tOp}">${esc(e.t)}</text>`;
+    if (e.sn) {
+      s += `<path d="${hexPath(x - 58, y + 38, 22, 14)}" fill="${C.Dl}" stroke="${C.D}" opacity="${tOp}"/>
+        <text x="${x - 58}" y="${y + 42}" font-size="10" font-style="italic" fill="${C.D}" text-anchor="middle" opacity="${tOp}">${e.doc}</text>
+        <text x="${x - 43}" y="${y + 42}" font-size="12.5" font-style="italic" fill="${C.muted}" opacity="${tOp}">“${esc(e.sn)}”</text>`;
+    }
+  }
+  if (nOp > 0) {
+    const base = e.k === 'S' ? 's' : 'e';
+    const ny = e.k === 'S' ? y + 6 : y + 1;
+    s += `<text x="${x}" y="${ny}" font-size="17" font-style="italic" fill="${C.ink}" text-anchor="middle" opacity="${nOp}">${sub(base, e.idx)}</text>`;
+    if (e.k === 'E') s += `<text x="${x}" y="${y + 14}" font-size="10.5" fill="${C.muted}" text-anchor="middle" class="sans" opacity="${nOp}">${e.tool}</text>`;
+  }
+  return s + '</g>';
+}
+
+function drawAnswer(ri, t, m) {
+  const a = seg(t, answerTime(ri), answerTime(ri) + 0.35);
+  if (a <= 0) return '';
+  const r = R[ri];
+  const x = AX, y = lerp(LIN_Y(ri), aY(ri), m);
+  const w = lerp(124, 104, m), h = lerp(48, 30, m);
+  const sc = lerp(0.85, 1, ease(a));
+  const tOp = clamp(1 - 2.4 * m), nOp = clamp(2.2 * m - 1.2);
+  let s = `<g opacity="${clamp(a * 1.6)}" transform="translate(${x} ${y}) scale(${sc}) translate(${-x} ${-y})">
+    <rect x="${x - w / 2}" y="${y - h / 2}" width="${w}" height="${h}" rx="5" fill="${C.Al}" stroke="${C.A}" stroke-width="1.5"/>`;
+  if (tOp > 0) s += `<text x="${x - 52}" y="${y - 6}" font-size="12" font-weight="700" fill="${C.A}" class="sans" letter-spacing="0.8" opacity="${tOp}">ANSWER</text>
+    <text x="${x - 52}" y="${y + 16}" font-size="20" font-weight="700" fill="${C.ink}" opacity="${tOp}">${r.ans}</text>`;
+  if (nOp > 0) s += `<text x="${x}" y="${y + 6}" font-size="17" fill="${C.ink}" text-anchor="middle" opacity="${nOp}"><tspan font-style="italic">${sub('a', ri + 1)}</tspan><tspan dy="-4"> = ${r.ans}</tspan></text>`;
+  return s + '</g>';
+}
+
+function flowArrows(t, m) {
+  const op = clamp(1 - 3 * m);
+  if (op <= 0) return '';
+  let s = '';
+  R.forEach((r, ri) => {
+    const y = LIN_Y(ri);
+    for (let j = 0; j + 1 < r.ev.length; j++) {
+      const a = seg(t, appearTime(ri, j + 1), appearTime(ri, j + 1) + 0.3);
+      if (a > 0) s += `<path d="M${LIN_X(j) + 71} ${y} L${LIN_X(j + 1) - 73} ${y}" stroke="#94A3B8" stroke-width="2" marker-end="url(#m-gray)" opacity="${a * op}"/>`;
+    }
+    const a = seg(t, answerTime(ri), answerTime(ri) + 0.3);
+    if (a > 0) s += `<path d="M${LIN_X(r.ev.length - 1) + 71} ${y} L${AX - 66} ${y}" stroke="#94A3B8" stroke-width="2" stroke-dasharray="5 5" marker-end="url(#m-gray)" opacity="${a * op}"/>`;
+  });
+  return s;
+}
+
+function graphEdges(t) {
+  if (t < T.edges) return '';
+  const dim = lerp(1, 0.4, ease(seg(t, T.score, T.score + 0.5)));
+  let s = '';
+  EDGES.forEach((e, i) => {
+    const start = T.edges + (e.type === 'ed' ? 0.5 : 0) + (i % 5) * 0.06;
+    const p = ease(seg(t, start, start + 0.7));
+    if (p <= 0) return;
+    let w = 1.6;
+    if (e.type === 'ed' && e.doc === 'B' && t >= T.gnn && t < T.score) w = 1.6 + 1.6 * seg(t, T.gnn + 1.2, T.gnn + 2.0);
+    const col = edgeColor[e.type];
+    const markers = p >= 0.98 ? `marker-start="url(#m-${e.type})" marker-end="url(#m-${e.type})"` : '';
+    s += `<path d="M${e.x1} ${e.y1} Q${e.cx} ${e.cy} ${e.x2} ${e.y2}" fill="none" stroke="${col}" stroke-width="${w}"
+      pathLength="1" stroke-dasharray="1 1" stroke-dashoffset="${1 - p}" ${markers} opacity="${dim}"/>`;
+  });
+  return s;
+}
+
+function docNodes(t) {
+  let s = '';
+  Object.entries(DOCS).forEach(([k, d]) => {
+    const a = ease(seg(t, T.edges + 0.3 + d.order * 0.2, T.edges + 0.8 + d.order * 0.2));
+    if (a <= 0) return;
+    const w = d.shared ? 70 : 64, h = 28;
+    const sc = lerp(0.6, 1, a);
+    s += `<g opacity="${a}" transform="translate(${d.x} ${d.y}) scale(${sc}) translate(${-d.x} ${-d.y})">
+      <path d="${hexPath(d.x, d.y, w, h)}" fill="${C.Dl}" stroke="${C.D}" stroke-width="1.6"/>
+      <text x="${d.x}" y="${d.y + 5}" font-size="17" font-style="italic" fill="${C.ink}" text-anchor="middle">${sub('d', k)}</text>`;
+    s += d.shared
+      ? `<text x="${d.x}" y="${d.y + 30}" font-size="12.5" font-style="italic" fill="${C.D}" text-anchor="middle">${esc(d.label)}</text>`
+      : `<text x="${d.x + 42}" y="${d.y + 5}" font-size="12.5" font-style="italic" fill="${C.D}">${esc(d.label)}</text>`;
+    s += '</g>';
+  });
+  const sh = ease(seg(t, T.edges + 1.0, T.edges + 1.5));
+  if (sh > 0) s += `<text x="82" y="${(DOCS.A.y + DOCS.B.y) / 2 + 5}" font-size="14" font-style="italic" fill="${C.D}" text-anchor="middle" opacity="${sh}">shared docs</text>`;
+  return s;
+}
+
+function gnn(t) {
+  if (t < T.gnn || t >= T.score) return '';
+  const L = (T.score - T.gnn) / 4, k = Math.min(3, Math.floor((t - T.gnn) / L));
+  const p = ease(clamp(((t - T.gnn) - k * L) / (L * 0.85)));
+  let s = `<rect x="${PX + PW - 238}" y="${P[0] + 8}" width="228" height="26" rx="5" fill="${C.st3}"/>
+    <text x="${PX + PW - 124}" y="${P[0] + 26}" font-size="16" font-style="italic" font-weight="700" fill="#fff" text-anchor="middle">Relational GNN · layer ${k + 1} / 4</text>`;
+  const glow = 0.10 + 0.05 * k + 0.05 * Math.sin(p * Math.PI);
+  R.forEach((r, ri) => r.ev.forEach(e => {
+    const g = gpos(ri, e);
+    s += `<rect x="${g.x - 42}" y="${g.y - 25}" width="84" height="50" rx="14" fill="${C.st3}" opacity="${glow}"/>`;
+  }));
+  Object.values(DOCS).forEach(d => {
+    s += `<rect x="${d.x - 44}" y="${d.y - 22}" width="88" height="44" rx="14" fill="${C.st3}" opacity="${glow}"/>`;
+  });
+  const op = 0.95 * Math.sin(Math.PI * clamp(p * 1.05));
+  EDGES.forEach(e => {
+    [p, 1 - p].forEach(pp => {
+      const q = qpt(e, pp);
+      s += `<circle cx="${q.x}" cy="${q.y}" r="4" fill="${edgeColor[e.type]}" stroke="#fff" stroke-width="1" opacity="${op}"/>`;
+    });
+  });
+  return s;
+}
+
+function scoring(t) {
+  const a0 = ease(seg(t, T.score, T.score + 0.5));
+  if (a0 <= 0) return { back: '', front: '' };
+  let back = `<g opacity="${a0}"><rect x="962" y="${P[0]}" width="136" height="${P[2] + PH - P[0]}" rx="10" fill="${C.qfl}" stroke="${C.qf}" stroke-width="1.2" stroke-opacity="0.5"/></g>`;
+  let front = '';
+  R.forEach((r, ri) => {
+    const g = ease(seg(t, T.score + 0.4 + ri * 0.6, T.score + 1.2 + ri * 0.6));
+    const fade = lerp(1, 0.45, ease(seg(t, T.select - 0.6, T.select)));
+    // Context: each Q-Former reads only its own rollout's Subquery/Evidence states.
+    r.ev.forEach((e, j) => {
+      const p = gpos(ri, e), [, nh] = nodeSize(e.k);
+      const w = ATTN[ri][j];
+      const x1 = p.x + 20, y1 = p.y + nh / 2, x2 = 975, y2 = qfY(ri) + 6;
+      const cx = (x1 + x2) / 2, cy = P[ri] + 150;
+      back += `<path d="M${x1} ${y1} Q${cx} ${cy} ${x2} ${y2}" fill="none" stroke="${C.ctx}" stroke-width="${1 + 4 * w}"
+        stroke-dasharray="6 5" stroke-dashoffset="${-t * 28}" opacity="${(0.25 + 0.75 * w) * g * fade}"/>`;
+    });
+    front += `<g opacity="${a0}">
+      <path d="M${AX} ${aY(ri) + 15} L${AX} ${qfY(ri) - 20}" stroke="${C.A}" stroke-width="1.6" marker-end="url(#m-qf)"/>
+      <rect x="975" y="${qfY(ri) - 18}" width="110" height="36" rx="5" fill="#fff" stroke="${C.qf}" stroke-width="1.6"/>
+      <text x="${QFX}" y="${qfY(ri) + 6}" font-size="17" font-weight="700" fill="${C.ink}" text-anchor="middle">QFormer</text></g>`;
+    // Score.
+    const sg = ease(seg(t, 17.6 + ri * 0.3, 18.4 + ri * 0.3));
+    const win = ri === 2 && t > T.select;
+    const val = SCORES[ri] * sg;
+    if (sg > 0) {
+      front += `<g opacity="${sg}">
+        <path d="M1085 ${qfY(ri)} L1146 ${qfY(ri)}" stroke="#64748B" stroke-width="1.5" marker-end="url(#m-gray)"/>
+        <text x="1114" y="${qfY(ri) - 7}" font-size="15" font-style="italic" fill="${C.ink}" text-anchor="middle">h<tspan dy="-6" font-size="70%">*</tspan></text>
+        <rect x="1148" y="${qfY(ri) - 17}" width="84" height="34" rx="5" fill="${win ? C.good : '#fff'}" stroke="${win ? C.good : '#94A3B8'}" stroke-width="1.5"/>
+        <text x="${SCX}" y="${qfY(ri) + 6}" font-size="17" font-weight="700" fill="${win ? '#fff' : C.ink}" text-anchor="middle">${val.toFixed(2)}</text></g>`;
+    }
+  });
+  const qa = ease(seg(t, 17.3, 17.8));
+  if (qa > 0) {
+    let dots = `<path d="M1218 76 L1256 76 L1256 ${qfY(2)}" fill="none" stroke="#94A3B8" stroke-width="1.5" stroke-dasharray="2 4"/>`;
+    R.forEach((r, ri) => { dots += `<path d="M1256 ${qfY(ri)} L1236 ${qfY(ri)}" stroke="#94A3B8" stroke-width="1.5" stroke-dasharray="2 4"/>`; });
+    front += `<g opacity="${qa}">${dots}
+      <ellipse cx="1190" cy="76" rx="28" ry="17" fill="${C.Ql}" stroke="${C.Q}" stroke-width="1.6"/>
+      <text x="1190" y="82" font-size="18" font-style="italic" font-weight="700" fill="${C.Q}" text-anchor="middle">${sub('z', 'q')}</text>
+      <text x="1190" y="${P[0] + 52}" font-size="14" font-style="italic" fill="${C.ink}" text-anchor="middle">score</text>
+      <text x="1190" y="${P[0] + 70}" font-size="13" font-style="italic" fill="${C.muted}" text-anchor="middle">γ cos(z, ρ(h*))</text></g>`;
+  }
+  const hl = ease(seg(t, T.select, T.select + 0.6));
+  if (hl > 0) {
+    R.forEach((r, ri) => { front += badge(r.ok, AX + 56, aY(ri) - 14, hl); });
+    front += `<text x="${SCX}" y="${qfY(2) + 36}" font-size="15" font-style="italic" font-weight="700" fill="${C.good}" text-anchor="middle" opacity="${hl}">arg max</text>`;
+  }
+  return { back, front };
+}
+
+function majority(t) {
+  const a = ease(seg(t, 6.0, 6.5)) * (1 - ease(seg(t, T.graph, T.graph + 0.5)));
+  if (a <= 0) return '';
+  const x = 1110, y = 150, w = 158;
+  return `<g opacity="${a}">
+    <rect x="${x}" y="${y}" width="${w}" height="196" rx="8" fill="#fff" stroke="${C.bad}" stroke-width="1.5"/>
+    <text x="${x + 14}" y="${y + 28}" font-size="18" font-weight="700" fill="${C.ink}">Majority vote</text>
+    <text x="${x + 14}" y="${y + 47}" font-size="13" font-style="italic" fill="${C.muted}">final answers only</text>
+    <text x="${x + 14}" y="${y + 80}" font-size="17" font-weight="700" fill="${C.ink}">1973</text>
+    <rect x="${x + 58}" y="${y + 68}" width="60" height="14" rx="3" fill="${C.A}" opacity="0.75"/>
+    <text x="${x + 124}" y="${y + 80}" font-size="14" fill="${C.muted}">×2</text>
+    <text x="${x + 14}" y="${y + 108}" font-size="17" font-weight="700" fill="${C.ink}">2003</text>
+    <rect x="${x + 58}" y="${y + 96}" width="30" height="14" rx="3" fill="${C.A}" opacity="0.75"/>
+    <text x="${x + 94}" y="${y + 108}" font-size="14" fill="${C.muted}">×1</text>
+    <line x1="${x + 14}" y1="${y + 126}" x2="${x + w - 14}" y2="${y + 126}" stroke="${C.faint}"/>
+    <text x="${x + 14}" y="${y + 156}" font-size="20" font-weight="700" fill="${C.bad}">→ 1973</text>
+    ${icon(false, x + 112, y + 150, 17, C.bad)}
+    <text x="${x + 14}" y="${y + 180}" font-size="13" font-style="italic" fill="${C.muted}">correct answer: 2003</text>
+  </g>`;
+}
+
+const CAPTIONS = [
+  [0, 1.2, 'K parallel search rollouts are sampled for the same question.'],
+  [1.2, 6.0, 'Each rollout searches, opens and finds in pages, and commits to a final answer.'],
+  [6.0, T.graph, 'Majority voting looks only at final answers: 1973 wins 2–1, but it is wrong.'],
+  [T.graph, T.gnn, 'Each Search and Open/Find stays its own node; pages from the same source link through Doc nodes.'],
+  [T.gnn, T.score, 'A relational GNN exchanges context within rollouts and across rollouts through shared documents.'],
+  [T.score, T.select, 'Each answer queries only its own trajectory’s updated states through a shared QFormer, then is scored against q.'],
+  [T.select, T.banner, 'TRACE returns the highest-scoring existing answer.'],
+];
+function caption(t) {
+  let s = '';
+  CAPTIONS.forEach(([a, b, txt]) => {
+    const op = Math.min(seg(t, a, a + 0.35), 1 - seg(t, b - 0.25, b));
+    if (op > 0) s += `<text x="640" y="662" font-size="18" font-style="italic" fill="${C.ink}" text-anchor="middle" opacity="${op}">${esc(txt)}</text>`;
+  });
+  const p = ease(seg(t, T.banner, T.banner + 0.6));
+  if (p > 0) {
+    s += `<g opacity="${p}">
+      <rect x="330" y="640" width="620" height="34" rx="6" fill="${C.ink}"/>
+      <text x="360" y="663" font-size="18" fill="#fff">Majority voting → <tspan font-weight="700">1973</tspan></text>
+      ${icon(false, 560, 657, 15, '#F87171')}
+      <text x="600" y="663" font-size="18" fill="#9CA3AF">|</text>
+      <text x="630" y="663" font-size="18" fill="#fff">TRACE → <tspan font-weight="700">2003</tspan></text>
+      ${icon(true, 772, 657, 15, '#4ADE80')}
+      <text x="792" y="663" font-size="14" font-style="italic" fill="#D1D5DB">no extra generation</text></g>`;
+  }
+  s += `<text x="1240" y="712" font-size="11" font-style="italic" fill="#9CA3AF" text-anchor="end">Illustrative example</text>`;
+  return s;
+}
+
+function renderAt(t) {
+  const m = morphP(t);
+  const sc = scoring(t);
+  let body = defs() + header(t) + question(t) + panels(t) + sc.back;
+  body += flowArrows(t, m) + graphEdges(t) + gnn(t);
+  R.forEach((r, ri) => {
+    r.ev.forEach((e, j) => { body += drawEvent(ri, j, e, t, m); });
+    body += drawAnswer(ri, t, m);
+  });
+  body += docNodes(t) + sc.front + majority(t) + legend(t) + caption(t);
+  document.getElementById('stage').innerHTML = `<rect width="1280" height="720" fill="#fff"/>` + body;
+}
+window.renderAt = renderAt;
+window.DURATION = DURATION;
+
+if (!location.search.includes('capture')) {
+  const t0 = performance.now();
+  const loop = now => { renderAt(((now - t0) / 1000) % DURATION); requestAnimationFrame(loop); };
+  requestAnimationFrame(loop);
+} else {
+  renderAt(0);
+}
+</script>
+</body>
+</html>

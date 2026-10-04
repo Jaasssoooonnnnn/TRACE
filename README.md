@@ -1,5 +1,9 @@
 # TRACE
 
+<p align="center">
+  <img src="assets/trace_demo.gif" width="100%" alt="TRACE demo: three rollouts are converted into an occurrence-preserving graph, propagated with a relational GNN, read out by an answer-conditioned QFormer, and scored to select the correct answer." />
+</p>
+
 Trajectory Ranking with Aggregated Cross-Rollout Evidence.
 
 This repository contains the WebQA and long-horizon selectors: graph construction from frozen trajectory caches, training, candidate selection, and evaluation.
